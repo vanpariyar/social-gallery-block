@@ -313,13 +313,12 @@ function gutenberg_instagram_post_grid_proxy_image( $request ) {
 	if ( $request instanceof WP_REST_Request ) {
 		$url = $request->get_param( 'url' );
 
-		// Robust URL reconstruction for signed CDN URLs with complex query parameters
-		if ( isset($_SERVER['REQUEST_URI']) ) {
+		// Fallback for cases where REST parser did not capture full signed URL
+		if ( ( empty( $url ) || strpos( $url, 'http' ) === false ) && isset( $_SERVER['REQUEST_URI'] ) ) {
 			$full_uri = $_SERVER['REQUEST_URI'];
-			$query_pos = strpos($full_uri, 'url=');
-			if ($query_pos !== false) {
-				$url = substr($full_uri, $query_pos + 4);
-				$url = rawurldecode($url);
+			$query_pos = strpos( $full_uri, 'url=' );
+			if ( $query_pos !== false ) {
+				$url = substr( $full_uri, $query_pos + 4 );
 			}
 		}
 	} else {
@@ -328,6 +327,11 @@ function gutenberg_instagram_post_grid_proxy_image( $request ) {
 
 	if ( empty( $url ) ) {
 		return new WP_Error( 'empty_url', 'URL is empty', array( 'status' => 400 ) );
+	}
+
+	// Recursively decode URL in case of single/double/triple encoding
+	while ( strpos( $url, 'http%3A' ) === 0 || strpos( $url, 'https%3A' ) === 0 || strpos( $url, 'http%3a' ) === 0 || strpos( $url, 'https%3a' ) === 0 ) {
+		$url = rawurldecode( $url );
 	}
 
 	// Basic security check: only proxy from known Social Media domains
@@ -354,15 +358,20 @@ function gutenberg_instagram_post_grid_proxy_image( $request ) {
 	}
 
 	if ( ! $is_allowed ) {
-		return new WP_Error( 'disallowed_url', 'URL not allowed: ' . esc_html($host), array( 'status' => 403 ) );
+		return new WP_Error( 'disallowed_url', 'URL not allowed: ' . esc_html( $host ), array( 'status' => 403 ) );
+	}
+
+	$referer = 'https://www.instagram.com/';
+	if ( strpos( $host, 'twimg.com' ) !== false || strpos( $host, 'twitter.com' ) !== false ) {
+		$referer = 'https://twitter.com/';
 	}
 
 	$response = wp_remote_get( $url, array(
 		'timeout'    => 60,
 		'sslverify'  => false,
-		'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+		'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
 		'headers'    => array(
-			'Referer' => 'https://www.instagram.com/',
+			'Referer' => $referer,
 		),
 	) );
 
@@ -410,33 +419,32 @@ function gutenberg_instagram_post_grid_proxy_image( $request ) {
  */
 function gutenberg_instagram_post_grid_fetch_data( $request ) {
 	$username = ( $request instanceof WP_REST_Request ) ? $request->get_param( 'username' ) : $request;
-	$transient_key = 'insta_grid_v2_' . md5( $username );
+	$username = ltrim( trim( (string) $username ), '@' );
+
+	if ( empty( $username ) ) {
+		return new WP_Error( 'empty_username', __( 'Please provide an Instagram username.', 'gutenberg-instagram-post-grid' ), array( 'status' => 400 ) );
+	}
+
+	$transient_key = 'insta_grid_v3_' . md5( strtolower( $username ) );
 
 	$cached_data = get_transient( $transient_key );
 	if ( $cached_data !== false ) {
 		return ( $request instanceof WP_REST_Request ) ? rest_ensure_response( $cached_data ) : $cached_data;
 	}
 
-	$url = sprintf( 'https://www.instagram.com/api/v1/users/web_profile_info/?username=%s', $username );
+	$url = sprintf( 'https://www.instagram.com/%s/', rawurlencode( $username ) );
 
 	$response = wp_remote_get( $url, array(
-		'timeout' => 20,
+		'timeout'   => 20,
 		'sslverify' => false,
-		'headers' => array(
-			'user-agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-			'x-ig-app-id' => '936619743392459',
-			'x-asbd-id' => '129477',
-			'x-ig-www-claim' => '0',
-			'x-requested-with' => 'XMLHttpRequest',
-			'accept' => '*/*',
-			'accept-language' => 'en-US,en;q=0.9',
-			'referer' => 'https://www.instagram.com/' . $username . '/',
-			'sec-ch-ua' => '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-			'sec-ch-ua-mobile' => '?0',
-			'sec-ch-ua-platform' => '"macOS"',
-			'sec-fetch-dest' => 'empty',
-			'sec-fetch-mode' => 'cors',
-			'sec-fetch-site' => 'same-origin',
+		'headers'   => array(
+			'user-agent'      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+			'accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+			'accept-language' => 'en-US,en;q=0.5',
+			'sec-fetch-dest'  => 'document',
+			'sec-fetch-mode'  => 'navigate',
+			'sec-fetch-site'  => 'none',
+			'sec-fetch-user'  => '?1',
 		),
 	) );
 
@@ -445,36 +453,119 @@ function gutenberg_instagram_post_grid_fetch_data( $request ) {
 	}
 
 	$status_code = wp_remote_retrieve_response_code( $response );
-	$body = wp_remote_retrieve_body( $response );
+	$html        = wp_remote_retrieve_body( $response );
 
-	if ( strpos( $body, 'for (;;);' ) === 0 ) {
-		$body = substr( $body, 9 );
+	if ( 404 === $status_code ) {
+		return new WP_Error( 'not_found', sprintf( __( 'Instagram account "%s" was not found.', 'gutenberg-instagram-post-grid' ), esc_html( $username ) ), array( 'status' => 404 ) );
 	}
 
-	$data = json_decode( $body );
-
-	if ( ! $data || $status_code !== 200 ) {
-		return new WP_Error( 'invalid_data', 'Invalid data or error from Instagram', array( 
-			'status' => $status_code, 
-			'body' => $body 
-		) );
+	if ( empty( $html ) ) {
+		return new WP_Error( 'empty_response', __( 'Empty response from Instagram.', 'gutenberg-instagram-post-grid' ), array( 'status' => 500 ) );
 	}
 
-	if ( ! isset( $data->data->user ) && ! isset( $data->graphql->user ) ) {
-		return new WP_Error( 'no_user_data', 'Instagram returned success but no user data was found. This may indicate the account is private or the API is limited.', array( 
-			'status' => $status_code, 
-			'body' => $body 
-		) );
+	$follower_count = 0;
+	$edges          = array();
+	$is_private     = false;
+	$user_found     = false;
+
+	$search_tree = function( $item ) use ( &$search_tree, &$follower_count, &$edges, &$is_private, &$user_found ) {
+		if ( ! is_array( $item ) ) {
+			return;
+		}
+
+		if ( isset( $item['is_private'] ) ) {
+			$is_private = (bool) $item['is_private'];
+		}
+		if ( isset( $item['follower_count'] ) && is_numeric( $item['follower_count'] ) ) {
+			$follower_count = (int) $item['follower_count'];
+			$user_found     = true;
+		}
+		foreach ( array( 'polaris_ordered_timeline_connection', 'xdt_api__v1__feed__user_timeline_graphql_connection', 'edge_owner_to_timeline_media' ) as $key ) {
+			if ( isset( $item[ $key ]['edges'] ) && is_array( $item[ $key ]['edges'] ) && ! empty( $item[ $key ]['edges'] ) ) {
+				$edges      = $item[ $key ]['edges'];
+				$user_found = true;
+			}
+		}
+		foreach ( $item as $val ) {
+			$search_tree( $val );
+		}
+	};
+
+	// 1. Search embedded JSON in <script type="application/json" ... data-sjs> tags
+	if ( preg_match_all( '/<script type=[\"\\\']application\/json[\"\\\'][^>]*data-sjs>(.*?)<\/script>/is', $html, $matches ) ) {
+		foreach ( $matches[1] as $script_content ) {
+			if ( strpos( $script_content, 'xig_user_by_username' ) !== false || strpos( $script_content, 'polaris_ordered_timeline_connection' ) !== false || strpos( $script_content, 'xdt_api__v1__feed__user_timeline' ) !== false ) {
+				$json = json_decode( $script_content, true );
+				if ( $json ) {
+					$search_tree( $json );
+				}
+			}
+		}
 	}
 
-	$final_data = $data;
-	if ( isset( $data->data->user ) ) {
-		$final_data = (object) array(
-			'graphql' => (object) array(
-				'user' => $data->data->user
-			)
+	// 2. Fallback: window._sharedData
+	if ( empty( $edges ) && preg_match( '/window\._sharedData\s*=\s*({.+?});<\/script>/s', $html, $matches ) ) {
+		$json = json_decode( $matches[1], true );
+		if ( $json ) {
+			$search_tree( $json );
+		}
+	}
+
+	if ( ! $user_found && empty( $edges ) ) {
+		return new WP_Error( 'no_user_data', sprintf( __( 'Could not find Instagram data for "%s". The account may be restricted or does not exist.', 'gutenberg-instagram-post-grid' ), esc_html( $username ) ), array( 'status' => 404 ) );
+	}
+
+	if ( $is_private && empty( $edges ) ) {
+		return new WP_Error( 'private_account', sprintf( __( 'The Instagram account "%s" is private. Only public accounts can be displayed.', 'gutenberg-instagram-post-grid' ), esc_html( $username ) ), array( 'status' => 403 ) );
+	}
+
+	$normalized_edges = array();
+	foreach ( $edges as $edge ) {
+		$node = isset( $edge['node'] ) ? $edge['node'] : $edge;
+		$shortcode = isset( $node['code'] ) ? $node['code'] : ( isset( $node['shortcode'] ) ? $node['shortcode'] : '' );
+		$display_url = isset( $node['display_uri'] ) ? $node['display_uri'] : ( isset( $node['display_url'] ) ? $node['display_url'] : '' );
+
+		if ( ! $shortcode || ! $display_url ) {
+			continue;
+		}
+
+		$caption_text = '';
+		if ( isset( $node['caption']['text'] ) ) {
+			$caption_text = (string) $node['caption']['text'];
+		} elseif ( isset( $node['edge_media_to_caption']['edges'][0]['node']['text'] ) ) {
+			$caption_text = (string) $node['edge_media_to_caption']['edges'][0]['node']['text'];
+		}
+
+		$normalized_edges[] = array(
+			'node' => array(
+				'id'          => isset( $node['id'] ) ? (string) $node['id'] : ( isset( $node['pk'] ) ? (string) $node['pk'] : '' ),
+				'shortcode'   => $shortcode,
+				'code'        => $shortcode,
+				'display_url' => $display_url,
+				'display_uri' => $display_url,
+				'caption'     => array( 'text' => $caption_text ),
+			),
 		);
 	}
+
+	if ( empty( $normalized_edges ) ) {
+		return new WP_Error( 'no_posts', sprintf( __( 'No public posts found for Instagram account "%s".', 'gutenberg-instagram-post-grid' ), esc_html( $username ) ), array( 'status' => 200 ) );
+	}
+
+	$final_data = json_decode( json_encode( array(
+		'graphql' => array(
+			'user' => array(
+				'username'         => $username,
+				'edge_followed_by' => array(
+					'count' => $follower_count,
+				),
+				'follower_count'   => $follower_count,
+				'edge_owner_to_timeline_media' => array(
+					'edges' => $normalized_edges,
+				),
+			),
+		),
+	) ) );
 
 	set_transient( $transient_key, $final_data, HOUR_IN_SECONDS );
 
@@ -486,9 +577,9 @@ function gutenberg_instagram_post_grid_fetch_data( $request ) {
  */
 function gutenberg_instagram_post_grid_render_block( $attributes ) {
 	$atts = array(
-		'username'      => isset( $attributes['userName'] ) ? $attributes['userName'] : '',
-		'columns'       => isset( $attributes['column'] ) ? $attributes['column'] : 4,
-		'count'         => isset( $attributes['postCount'] ) ? $attributes['postCount'] : 12,
+		'username'      => isset( $attributes['userName'] ) ? $attributes['userName'] : ( isset( $attributes['username'] ) ? $attributes['username'] : '' ),
+		'columns'       => isset( $attributes['column'] ) ? $attributes['column'] : ( isset( $attributes['columns'] ) ? $attributes['columns'] : 4 ),
+		'count'         => isset( $attributes['postCount'] ) ? $attributes['postCount'] : ( isset( $attributes['count'] ) ? $attributes['count'] : 12 ),
 		'cropped'       => ( isset( $attributes['isCroped'] ) && ! $attributes['isCroped'] ) ? 'no' : 'yes',
 		'showFollowers' => isset( $attributes['showFollowers'] ) ? (bool) $attributes['showFollowers'] : false,
 	);
@@ -548,11 +639,13 @@ function gutenberg_instagram_post_grid_render_gallery( $atts ) {
 			<ul class="blocks-gallery-grid">
 				<?php foreach ( $media as $post ) : 
 					$node = $post->node;
-					$proxy_url = add_query_arg( array( 'url' => rawurlencode($node->display_url) ), rest_url( 'instagram-post-grid/v1/proxy-image' ) );
+					$display_url = isset( $node->display_url ) ? $node->display_url : ( isset( $node->display_uri ) ? $node->display_uri : '' );
+					$shortcode = isset( $node->shortcode ) ? $node->shortcode : ( isset( $node->code ) ? $node->code : '' );
+					$proxy_url = add_query_arg( array( 'url' => $display_url ), rest_url( 'instagram-post-grid/v1/proxy-image' ) );
 					?>
 					<li class="blocks-gallery-item">
 						<figure>
-							<a href="https://www.instagram.com/p/<?php echo esc_attr( $node->shortcode ); ?>/" target="_blank" rel="noopener noreferrer">
+							<a href="https://www.instagram.com/p/<?php echo esc_attr( $shortcode ); ?>/" target="_blank" rel="noopener noreferrer">
 								<img src="<?php echo esc_url( $proxy_url ); ?>" alt="" />
 							</a>
 						</figure>

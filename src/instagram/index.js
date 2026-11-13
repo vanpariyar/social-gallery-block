@@ -1,6 +1,6 @@
 import { registerBlockType } from '@wordpress/blocks';
 import { __, sprintf } from '@wordpress/i18n';
-import { Fragment, useState } from '@wordpress/element';
+import { Fragment, useState, useEffect } from '@wordpress/element';
 import {
 	TextControl,
 	ToggleControl,
@@ -44,12 +44,20 @@ const getProxyUrl = ( url ) => {
 	if ( ! url ) {
 		return '';
 	}
-	return addQueryArgs( '/wp-json/instagram-post-grid/v1/proxy-image', {
+	const root =
+		typeof window !== 'undefined' &&
+		window.wpApiSettings &&
+		window.wpApiSettings.root
+			? window.wpApiSettings.root
+			: '/wp-json/';
+	const endpoint =
+		root.replace( /\/$/, '' ) + '/instagram-post-grid/v1/proxy-image';
+	return addQueryArgs( endpoint, {
 		url,
 	} );
 };
 
-const InstaPanel = ( { props, getUserInfo, error } ) => {
+const InstaPanel = ( { props, getUserInfo, error, isLoading } ) => {
 	return (
 		<PanelBody
 			title={ __(
@@ -134,16 +142,26 @@ const InstaPanel = ( { props, getUserInfo, error } ) => {
 					onChange={ ( val ) =>
 						props.setAttributes( { userName: val } )
 					}
+					onKeyDown={ ( e ) => {
+						if ( e.key === 'Enter' ) {
+							e.preventDefault();
+							getUserInfo();
+						}
+					} }
 				/>
 			</PanelRow>
 			{ props.attributes.userName ? (
 				<PanelRow>
-					<Button isPrimary onClick={ () => getUserInfo() }>
-						{ ' ' }
+					<Button
+						isPrimary
+						isBusy={ isLoading }
+						disabled={ isLoading }
+						onClick={ () => getUserInfo() }
+					>
 						{ __(
 							'Fetch Details',
 							'gutenberg-instagram-post-grid'
-						) }{ ' ' }
+						) }
 					</Button>
 				</PanelRow>
 			) : (
@@ -153,17 +171,24 @@ const InstaPanel = ( { props, getUserInfo, error } ) => {
 	);
 };
 
-const MyPanel = ( { props, getUserInfo, error } ) => (
+const MyPanel = ( { props, getUserInfo, error, isLoading } ) => (
 	<InspectorControls>
 		<InstaPanel
 			props={ props }
 			getUserInfo={ getUserInfo }
 			error={ error }
+			isLoading={ isLoading }
 		/>
 	</InspectorControls>
 );
 
-const InstagramEmbed = ( { props, getUserInfo, isServer = false, error } ) => {
+const InstagramEmbed = ( {
+	props,
+	getUserInfo,
+	isServer = false,
+	error,
+	isLoading,
+} ) => {
 	const { attributes } = props;
 	const { userObject, column, isCroped, postCount, showFollowers, userName } =
 		attributes;
@@ -179,6 +204,7 @@ const InstagramEmbed = ( { props, getUserInfo, isServer = false, error } ) => {
 					props={ props }
 					getUserInfo={ getUserInfo }
 					error={ error }
+					isLoading={ isLoading }
 				/>
 			</div>
 		);
@@ -220,25 +246,35 @@ const InstagramEmbed = ( { props, getUserInfo, isServer = false, error } ) => {
 				<ul className="blocks-gallery-grid">
 					{ userData.edge_owner_to_timeline_media.edges
 						.slice( 0, postCount )
-						.map( ( value, key ) => (
-							<li key={ key } className="blocks-gallery-item">
-								<figure>
-									<a
-										href={ `https://www.instagram.com/p/${ value.node.shortcode }/` }
-										target="_blank"
-										rel="noopener noreferrer"
-									>
-										<img
-											src={ getProxyUrl(
-												value.node.display_url
-											) }
-											alt=""
-											tabIndex="0"
-										/>
-									</a>
-								</figure>
-							</li>
-						) ) }
+						.map( ( value, key ) => {
+							const shortcode =
+								value.node.shortcode || value.node.code || '';
+							const displayUrl =
+								value.node.display_url ||
+								value.node.display_uri ||
+								'';
+							const captionText = value.node.caption?.text || '';
+
+							return (
+								<li key={ key } className="blocks-gallery-item">
+									<figure>
+										<a
+											href={ `https://www.instagram.com/p/${ shortcode }/` }
+											target="_blank"
+											rel="noopener noreferrer"
+										>
+											<img
+												src={ getProxyUrl(
+													displayUrl
+												) }
+												alt={ captionText }
+												tabIndex="0"
+											/>
+										</a>
+									</figure>
+								</li>
+							);
+						} ) }
 				</ul>
 			</figure>
 		</Fragment>
@@ -264,15 +300,22 @@ const FollowerCount = ( { count, showFollowers } ) => (
 registerBlockType( metadata.name, {
 	edit: function Edit( props ) {
 		const [ error, setError ] = useState( null );
+		const [ isLoading, setIsLoading ] = useState( false );
 
 		const getUserInfo = async () => {
 			let userName = props.attributes.userName;
-			userName = typeof userName !== 'undefined' ? userName : 'instagram';
+			userName =
+				typeof userName !== 'undefined'
+					? userName.replace( /^@/, '' ).trim()
+					: 'instagram';
 			setError( null );
+			setIsLoading( true );
 
 			try {
 				const response = await apiFetch( {
-					path: `instagram-post-grid/v1/fetch?username=${ userName }`,
+					path: `instagram-post-grid/v1/fetch?username=${ encodeURIComponent(
+						userName
+					) }`,
 					method: 'GET',
 				} );
 
@@ -293,6 +336,7 @@ registerBlockType( metadata.name, {
 				}
 
 				props.setAttributes( {
+					userName,
 					userObject: {
 						userObject: response,
 						userObjectLoaded,
@@ -307,7 +351,9 @@ registerBlockType( metadata.name, {
 					'gutenberg-instagram-post-grid'
 				);
 
-				if ( err.data && err.data.body ) {
+				if ( err.message ) {
+					errorMessage = err.message;
+				} else if ( err.data && err.data.body ) {
 					try {
 						const body = JSON.parse( err.data.body );
 						if ( body.message ) {
@@ -316,16 +362,26 @@ registerBlockType( metadata.name, {
 					} catch ( e ) {
 						// Fallback to default or err.message
 					}
-				} else if ( err.message ) {
-					errorMessage = err.message;
 				}
 
 				setError( errorMessage );
 				props.setAttributes( {
 					userObject: { userObject: {}, userObjectLoaded: 0 },
 				} );
+			} finally {
+				setIsLoading( false );
 			}
 		};
+
+		useEffect( () => {
+			if (
+				props.attributes.userName &&
+				( ! props.attributes.userObject ||
+					! props.attributes.userObject.userObjectLoaded )
+			) {
+				getUserInfo();
+			}
+		}, [] );
 
 		return (
 			<div { ...useBlockProps() }>
@@ -333,11 +389,13 @@ registerBlockType( metadata.name, {
 					props={ props }
 					getUserInfo={ getUserInfo }
 					error={ error }
+					isLoading={ isLoading }
 				/>
 				<InstagramEmbed
 					props={ props }
 					getUserInfo={ getUserInfo }
 					error={ error }
+					isLoading={ isLoading }
 				/>
 			</div>
 		);
