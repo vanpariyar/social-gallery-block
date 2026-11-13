@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress';
 
 export default defineConfig({
-	base: '/gutenberg-instagram-post-grid/',
+	base: '/social-gallery-block/',
 	title: 'Social Gallery Block',
 	description:
 		'Interactive documentation for the Social Gallery Block WordPress plugin.',
@@ -41,7 +41,7 @@ export default defineConfig({
 		socialLinks: [
 			{
 				icon: 'github',
-				link: 'https://github.com/vanpariyar/gutenberg-instagram-post-grid',
+				link: 'https://github.com/vanpariyar/social-gallery-block',
 			},
 		],
 		footer: {
