@@ -2,7 +2,7 @@
   "$schema": "https://schemas.wp.org/trunk/block.json",
   "apiVersion": 3,
   "name": "vanpariyar/instagram-post-grid",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "title": "Social Gallery Block",
   "category": "design",
   "icon": "instagram",
